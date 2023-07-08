@@ -21,7 +21,6 @@
 #include "commander.h"
 #include "commands/command_parser.h"
 #include "error_constants.h"
-#include "scan_base.h"
 #include "server/server.h"
 #include "types/json.h"
 #include "types/redis_json.h"
@@ -75,8 +74,10 @@ class CommandJsonGet final : public CommandJsonBase {
     }
 
     redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
-    redis_json.Get(key, json_paths, output);
-
+    rocksdb::Status s = redis_json.JsonGet(key, json_paths, output);
+    if (!s.ok()) {
+      return Status::FromErrno(s.ToString());
+    }
     return Status::OK();
   }
 };
@@ -88,16 +89,25 @@ class CommandJsonSet final : public CommandJsonBase {
  public:
   Status Parse(const std::vector<std::string> &args) override {
     CommandParser parser(args, 3);
-    std::string_view set_flag;
-    // TODO(mwish): These are all not support yet.
     while (parser.Good()) {
-      if (parser.EatEqICaseFlag("NX", set_flag)) {
-        return Status::RedisParseErr;
-      } else if (parser.EatEqICaseFlag("XX", set_flag)) {
-        return Status::RedisParseErr;
-      } else if (parser.EatEqICaseFlag("FORMAT", set_flag)) {
+      // TODO(mwish): make clear what's EatEqICase and EatEqICaseFlag.
+      // TODO(mwish): verify multiple NX and XX used.
+      if (parser.EatEqICase("NX")) {
+        if (set_flags_ != JsonSetFlags::kNone) {
+          return Status::RedisParseErr;
+        }
+        set_flags_ = JsonSetFlags::kJsonSetNX;
+      } else if (parser.EatEqICase("XX")) {
+        if (set_flags_ != JsonSetFlags::kNone) {
+          return Status::RedisParseErr;
+        }
+        set_flags_ = JsonSetFlags::kJsonSetXX;
+      } else if (parser.EatEqICase("FORMAT")) {
+        // not support.
+        // TODO(mwish): make clear what's the better string here.
         return Status::RedisParseErr;
       } else {
+        // "ERR syntax error"
         return parser.InvalidSyntax();
       }
     }
@@ -105,9 +115,21 @@ class CommandJsonSet final : public CommandJsonBase {
     return Status::OK();
   }
 
-  Status Execute(Server *svr, Connection *conn, std::string *output) override {}
+  Status Execute(Server *svr, Connection *conn, std::string *output) override {
+    auto json_path = JsonPath::BuildJsonPath(args_[2]);
+    if (!json_path.IsOK()) {
+      return json_path.ToStatus();
+    }
+    redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
+    rocksdb::Status s = redis_json.JsonSet(args_[1], json_path.GetValue(), args_[3], set_flags_);
+    if (!s.ok()) {
+      return Status::FromErrno(s.ToString());
+    }
+    return Status::OK();
+  }
 
  private:
+  JsonSetFlags set_flags_ = JsonSetFlags::kNone;
 };
 
 ///
@@ -115,8 +137,25 @@ class CommandJsonSet final : public CommandJsonBase {
 ///
 class CommandJsonDel final : public CommandJsonBase {
   Status Execute(Server *svr, Connection *conn, std::string *output) override {
-    // NYI
-    __builtin_unreachable();
+    std::string_view json_path_string;
+    if (args_.size() < 2) {
+      // TODO(mwish): Use macro or other.
+      json_path_string = "$";
+    } else {
+      json_path_string = args_[1];
+    }
+
+    auto json_path = JsonPath::BuildJsonPath(std::string(json_path_string));
+    if (!json_path.IsOK()) {
+      return json_path.ToStatus();
+    }
+
+    redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
+    rocksdb::Status s = redis_json.JsonDel(args_[1], json_path.GetValue());
+    if (!s.ok()) {
+      return Status::FromErrno(s.ToString());
+    }
+    return Status::OK();
   }
 };
 

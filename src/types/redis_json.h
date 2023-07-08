@@ -34,12 +34,10 @@ namespace redis {
 class RedisJson : public Database {
  public:
   explicit RedisJson(engine::Storage *storage, const std::string &ns) : Database(storage, ns) {}
-  rocksdb::Status Get(const Slice &user_key, const std::vector<JsonPath> &path, std::string *values);
-  rocksdb::Status Set(const Slice &user_key, const Slice &path, const std::vector<std::string> &values);
-  /*
-    rocksdb::Status Del(const Slice &user_key, const std::vector<std::string> &paths);
-    rocksdb::Status Type(const Slice &user_key, const Slice &path);
-  */
+  rocksdb::Status JsonGet(const Slice &user_key, const std::vector<JsonPath> &path, std::string *values);
+  rocksdb::Status JsonSet(const Slice &user_key, const JsonPath &path, const Slice &set_value, JsonSetFlags set_flags);
+  rocksdb::Status JsonDel(const Slice &user_key, const JsonPath &path);
+
   // TODO(mwish): Typing operations
   // TODO(mwish): Debug memory and disk usage
 };

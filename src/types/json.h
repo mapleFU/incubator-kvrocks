@@ -39,6 +39,6 @@ class JsonPath {
   JsonPathExpression expression_;
 };
 
-enum class JsonSetFlags { kNONE, kJsonSetNX, kJsonSetXX };
+enum class JsonSetFlags { kNone, kJsonSetNX, kJsonSetXX };
 
 }  // namespace redis
