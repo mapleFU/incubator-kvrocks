@@ -28,7 +28,32 @@ rocksdb::Status RedisJson::JsonGet(const Slice &user_key, const std::vector<Json
 }
 rocksdb::Status RedisJson::JsonSet(const Slice &user_key, const JsonPath &path, const Slice &set_value,
                                    JsonSetFlags set_flags) {
-  return rocksdb::Status::OK();
+  jsoncons::json_parser parser;
+  parser.update(set_value.ToStringView());
+  std::error_code ec;
+  jsoncons::json_decoder<JsonType> json_decoder;
+  parser.finish_parse(json_decoder, ec);
+  if (!json_decoder.is_valid()) {
+    return rocksdb::Status::IOError(ec.message());
+  }
+  auto json = json_decoder.get_result();
+  rocksdb::ReadOptions read_options;
+  std::string exist_key;
+  auto s = storage_->Get(read_options, user_key, &exist_key);
+  if (!s.ok() && !s.IsNotFound()) {
+    return s;
+  }
+  if (s.IsNotFound()) {
+    if (set_flags == JsonSetFlags::kJsonSetXX) {
+      // set a normalized json string
+      // NYI
+      __builtin_unreachable();
+    } else {
+      // NYI
+      __builtin_unreachable();
+    }
+  }
+  return {};
 }
 
 }  // namespace redis

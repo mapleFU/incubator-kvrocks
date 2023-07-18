@@ -11,17 +11,19 @@
 
 namespace redis {
 
-// TODO(mwish): Should I move it to separate place like `jsonpath.h` and `jsonpath.cc`?
 using JsonType = jsoncons::basic_json<char, jsoncons::sorted_policy>;
 using JsonPathExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 
 class JsonPath {
  public:
+  static constexpr std::string_view ROOT_PATH = "$";
+
   static StatusOr<JsonPath> BuildJsonPath(std::string path);
+  static JsonPath BuildJsonFullPath() { return BuildJsonPath(std::string(ROOT_PATH)).GetValue(); }
 
   bool IsLegacy() const noexcept { return !fixed_path_.empty(); }
 
-  Slice Path() {
+  std::string_view Path() {
     if (IsLegacy()) {
       return fixed_path_;
     }

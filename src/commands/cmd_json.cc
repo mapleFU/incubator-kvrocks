@@ -27,7 +27,11 @@
 
 namespace redis {
 
-class CommandJsonBase : public Commander {
+///
+/// JSON.GET <key>
+///         [path ...]
+///
+class CommandJsonGet final : public Commander {
  public:
   inline static constexpr std::string_view CMD_ARG_NOESCAPE = "noescape";
   inline static constexpr std::string_view CMD_ARG_INDENT = "indent";
@@ -39,59 +43,63 @@ class CommandJsonBase : public Commander {
 
   inline static const std::unordered_set<std::string_view> INTERNAL_COMMANDS = {
       CMD_ARG_NOESCAPE, CMD_ARG_INDENT, CMD_ARG_NEWLINE, CMD_ARG_SPACE, CMD_ARG_FORMAT};
-};
 
-///
-/// JSON.GET <key>
-///         [path ...]
-///
-/// FORMAT, INDENT, NEWLINE, SPACE is not supported.
-class CommandJsonGet final : public CommandJsonBase {
- public:
-  Status Execute(Server *svr, Connection *conn, std::string *output) override {
-    auto key = args_[0];
-    std::vector<JsonPath> json_paths;
-    for (size_t i = 1; i < args_.size(); ++i) {
-      if (args_[i].size() < CommandJsonBase::JSONGET_SUBCOMMANDS_MAXSTRLEN) {
+  Status Parse(const std::vector<std::string> &args) override {
+    // RedisJson support JSON.GET like:
+    // ```
+    // JSON.GET <key>
+    //         [INDENT indentation-string]
+    //         [NEWLINE line-break-string]
+    //         [SPACE space-string]
+    //         [path ...]
+    // ```
+    // However, we don't support FORMAT, INDENT, NEWLINE and SPACE here.
+    for (size_t i = 2; i < args_.size(); ++i) {
+      if (args_[i].size() < JSONGET_SUBCOMMANDS_MAXSTRLEN) {
         auto lower = util::ToLower(args_[i]);
         if (INTERNAL_COMMANDS.find(lower) != INTERNAL_COMMANDS.end()) {
           if (lower == CMD_ARG_NOESCAPE) {
             continue;
           }
-          // Not support
-          return Status::FromErrno("NYI");
+          return {Status::RedisParseErr, fmt::format("{} not support", args_[i])};
         }
       }
       auto json_path = JsonPath::BuildJsonPath(args_[i]);
       if (!json_path.IsOK()) {
         return json_path.ToStatus();
       }
-      json_paths.push_back(std::move(json_path.GetValue()));
+      json_paths_.push_back(std::move(json_path.GetValue()));
     }
-
-    if (json_paths.empty()) {
-      json_paths.push_back(JsonPath::BuildJsonPath("$").GetValue());
-    }
-
-    redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
-    rocksdb::Status s = redis_json.JsonGet(key, json_paths, output);
-    if (!s.ok()) {
-      return Status::FromErrno(s.ToString());
+    // JSON.GET <key> is regard as get "$".
+    if (json_paths_.empty()) {
+      json_paths_.push_back(JsonPath::BuildJsonFullPath());
     }
     return Status::OK();
   }
+
+  Status Execute(Server *svr, Connection *conn, std::string *output) override {
+    const auto &key = args_[1];
+
+    redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
+    rocksdb::Status s = redis_json.JsonGet(key, json_paths_, output);
+    if (!s.ok()) {
+      return {Status::RedisExecErr, s.ToString()};
+    }
+    return Status::OK();
+  }
+
+ private:
+  std::vector<JsonPath> json_paths_;
 };
 
 ///
 /// JSON.SET <key> <path> <json> [NX | XX | FORMAT <format>]
 ///
-class CommandJsonSet final : public CommandJsonBase {
+class CommandJsonSet final : public Commander {
  public:
   Status Parse(const std::vector<std::string> &args) override {
-    CommandParser parser(args, 3);
+    CommandParser parser(args, 4);
     while (parser.Good()) {
-      // TODO(mwish): make clear what's EatEqICase and EatEqICaseFlag.
-      // TODO(mwish): verify multiple NX and XX used.
       if (parser.EatEqICase("NX")) {
         if (set_flags_ != JsonSetFlags::kNone) {
           return Status::RedisParseErr;
@@ -103,9 +111,7 @@ class CommandJsonSet final : public CommandJsonBase {
         }
         set_flags_ = JsonSetFlags::kJsonSetXX;
       } else if (parser.EatEqICase("FORMAT")) {
-        // not support.
-        // TODO(mwish): make clear what's the better string here.
-        return Status::RedisParseErr;
+        return {Status::RedisParseErr, fmt::format("FORMAT not support")};
       } else {
         // "ERR syntax error"
         return parser.InvalidSyntax();
@@ -135,31 +141,30 @@ class CommandJsonSet final : public CommandJsonBase {
 ///
 /// JSON.DEL <key> [path]
 ///
-class CommandJsonDel final : public CommandJsonBase {
+class CommandJsonDel final : public Commander {
   Status Execute(Server *svr, Connection *conn, std::string *output) override {
     std::string_view json_path_string;
     if (args_.size() < 2) {
-      // TODO(mwish): Use macro or other.
-      json_path_string = "$";
+      json_path_string = JsonPath::ROOT_PATH;
     } else {
-      json_path_string = args_[1];
+      json_path_string = args_[2];
     }
 
     auto json_path = JsonPath::BuildJsonPath(std::string(json_path_string));
     if (!json_path.IsOK()) {
-      return json_path.ToStatus();
+      return {Status::RedisParseErr, fmt::format("PARSE {} failed", json_path_string)};
     }
 
     redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
     rocksdb::Status s = redis_json.JsonDel(args_[1], json_path.GetValue());
     if (!s.ok()) {
-      return Status::FromErrno(s.ToString());
+      return {Status::RedisExecErr, s.ToString()};
     }
     return Status::OK();
   }
 };
 
-class CommandJsonType final : public CommandJsonBase {
+class CommandJsonType final : public Commander {
   Status Execute(Server *svr, Connection *conn, std::string *output) override {
     // NYI
     __builtin_unreachable();
