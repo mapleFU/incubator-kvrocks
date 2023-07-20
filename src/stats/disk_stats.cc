@@ -136,4 +136,9 @@ rocksdb::Status Disk::GetStreamSize(const Slice &ns_key, uint64_t *key_size) {
   return GetApproximateSizes(metadata, ns_key, storage_->GetCFHandle(engine::kStreamColumnFamilyName), key_size);
 }
 
+rocksdb::Status Disk::GetJsonSize(const Slice &user_key, uint64_t *key_size) {
+  // Note: Should we encapsulate it under string?
+  return GetStringSize(user_key, key_size);
+}
+
 }  // namespace redis

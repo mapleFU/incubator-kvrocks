@@ -29,13 +29,15 @@
 #include "json.h"
 #include "storage/redis_db.h"
 #include "storage/redis_metadata.h"
+#include "types/redis_string.h"
 
 namespace redis {
-class RedisJson : public Database {
+class RedisJson : public String {
  public:
-  explicit RedisJson(engine::Storage *storage, const std::string &ns) : Database(storage, ns) {}
-  rocksdb::Status JsonGet(const Slice &user_key, const std::vector<JsonPath> &path, std::string *values);
-  rocksdb::Status JsonSet(const Slice &user_key, const JsonPath &path, const Slice &set_value, JsonSetFlags set_flags);
-  rocksdb::Status JsonDel(const Slice &user_key, const JsonPath &path);
+  explicit RedisJson(engine::Storage *storage, const std::string &ns) : String(storage, ns) {}
+  rocksdb::Status JsonGet(const std::string &user_key, const std::vector<JsonPath> &path, std::string *values);
+  rocksdb::Status JsonSet(const std::string &user_key, const JsonPath &path, const std::string &set_value,
+                          JsonSetFlags set_flags, bool *set_ok);
+  rocksdb::Status JsonDel(const std::string &user_key, const JsonPath &path);
 };
 }  // namespace redis

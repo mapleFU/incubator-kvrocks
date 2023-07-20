@@ -72,7 +72,7 @@ class CommandJsonGet final : public Commander {
     }
     // JSON.GET <key> is regard as get "$".
     if (json_paths_.empty()) {
-      json_paths_.push_back(JsonPath::BuildJsonFullPath());
+      json_paths_.push_back(JsonPath::BuildJsonRootPath());
     }
     return Status::OK();
   }
@@ -127,9 +127,15 @@ class CommandJsonSet final : public Commander {
       return json_path.ToStatus();
     }
     redis::RedisJson redis_json(svr->storage, conn->GetNamespace());
-    rocksdb::Status s = redis_json.JsonSet(args_[1], json_path.GetValue(), args_[3], set_flags_);
+    bool set_success = false;
+    rocksdb::Status s = redis_json.JsonSet(args_[1], json_path.GetValue(), args_[3], set_flags_, &set_success);
     if (!s.ok()) {
       return Status::FromErrno(s.ToString());
+    }
+    if (!set_success) {
+      *output = redis::NilString();
+    } else {
+      *output = redis::SimpleString("OK");
     }
     return Status::OK();
   }

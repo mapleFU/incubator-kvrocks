@@ -44,6 +44,7 @@ class Disk : public Database {
   rocksdb::Status GetBitmapSize(const Slice &ns_key, uint64_t *key_size);
   rocksdb::Status GetSortedintSize(const Slice &ns_key, uint64_t *key_size);
   rocksdb::Status GetStreamSize(const Slice &ns_key, uint64_t *key_size);
+  rocksdb::Status GetJsonSize(const Slice &user_key, uint64_t *key_size);
   rocksdb::Status GetKeySize(const Slice &user_key, RedisType type, uint64_t *key_size);
 
  private:

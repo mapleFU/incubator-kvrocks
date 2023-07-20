@@ -33,4 +33,22 @@ std::optional<std::string> JsonPath::tryConvertLegacyToJsonPath(Slice path) {
   return std::nullopt;
 }
 
+StatusOr<JsonType> ParseJson(std::string_view data) {
+  jsoncons::json_parser parser;
+  parser.update(data.data(), data.size());
+  std::error_code ec;
+  jsoncons::json_decoder<JsonType> json_decoder;
+  parser.finish_parse(json_decoder, ec);
+  if (!json_decoder.is_valid()) {
+    return {ec.message()};
+  }
+  return json_decoder.get_result();
+}
+
+std::string ToString(const JsonType& json_value) {
+  std::string json_str;
+  jsoncons::encode_json(json_value, json_str);
+  return json_str;
+}
+
 }  // namespace redis
