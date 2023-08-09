@@ -26,6 +26,7 @@
 
 #include "storage/redis_db.h"
 #include "storage/redis_metadata.h"
+#include "types/bloom_filter.h"
 
 struct StringPair {
   Slice key;
