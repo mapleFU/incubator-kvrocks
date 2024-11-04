@@ -344,27 +344,26 @@ void Connection::RecordProfilingSampleIfNeed(const std::string &cmd, uint64_t du
   srv_->GetPerfLog()->PushEntry(std::move(entry));
 }
 
-Status Connection::ExecuteCommand(const std::string &cmd_name, const std::vector<std::string> &cmd_tokens,
-                                  Commander *current_cmd, std::string *reply) {
+Status Connection::ExecuteCommand(engine::Context &ctx, const std::string &cmd_name,
+                                  const std::vector<std::string> &cmd_tokens, Commander *current_cmd,
+                                  std::string *reply) {
   srv_->stats.IncrCalls(cmd_name);
 
   auto start = std::chrono::high_resolution_clock::now();
   bool is_profiling = IsProfilingEnabled(cmd_name);
-  auto s = current_cmd->Execute(srv_, this, reply);
+  auto s = current_cmd->Execute(ctx, srv_, this, reply);
   auto end = std::chrono::high_resolution_clock::now();
   uint64_t duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
   if (is_profiling) RecordProfilingSampleIfNeed(cmd_name, duration);
 
   srv_->SlowlogPushEntryIfNeeded(&cmd_tokens, duration, this);
   srv_->stats.IncrLatency(static_cast<uint64_t>(duration), cmd_name);
-  srv_->FeedMonitorConns(this, cmd_tokens);
   return s;
 }
 
-static bool IsCmdForIndexing(const CommandAttributes *attr) {
-  return (attr->flags & redis::kCmdWrite) &&
-         (attr->category == CommandCategory::Hash || attr->category == CommandCategory::JSON ||
-          attr->category == CommandCategory::Key);
+static bool IsCmdForIndexing(uint64_t cmd_flags, CommandCategory cmd_cat) {
+  return (cmd_flags & redis::kCmdWrite) &&
+         (cmd_cat == CommandCategory::Hash || cmd_cat == CommandCategory::JSON || cmd_cat == CommandCategory::Key);
 }
 
 void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
@@ -418,17 +417,8 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       // No lock guard, because 'exec' command has acquired 'WorkExclusivityGuard'
     } else if (cmd_flags & kCmdExclusive) {
       exclusivity = srv_->WorkExclusivityGuard();
-
-      // When executing lua script commands that have "exclusive" attribute, we need to know current connection,
-      // but we should set current connection after acquiring the WorkExclusivityGuard to make it thread-safe
-      srv_->SetCurrentConnection(this);
     } else {
       concurrency = srv_->WorkConcurrencyGuard();
-    }
-
-    if (cmd_flags & kCmdROScript) {
-      // if executing read only lua script commands, set current connection.
-      srv_->SetCurrentConnection(this);
     }
 
     if (srv_->IsLoading() && !(cmd_flags & kCmdLoading)) {
@@ -472,8 +462,8 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       DisableFlag(kAsking);
     }
 
-    // We don't execute commands, but queue them, ant then execute in EXEC command
-    if (is_multi_exec && !in_exec_ && !(cmd_flags & kCmdMulti)) {
+    // We don't execute commands, but queue them, and then execute in EXEC command
+    if (is_multi_exec && !in_exec_ && !(cmd_flags & kCmdEndMulti)) {
       multi_cmds_.emplace_back(cmd_tokens);
       Reply(redis::SimpleString("QUEUED"));
       continue;
@@ -497,36 +487,41 @@ void Connection::ExecuteCommands(std::deque<CommandTokens> *to_process_cmds) {
       continue;
     }
 
-    auto no_txn_ctx = engine::Context::NoTransactionContext(srv_->storage);
-    // TODO: transaction support for index recording
-    std::vector<GlobalIndexer::RecordResult> index_records;
-    if (!srv_->index_mgr.index_map.empty() && IsCmdForIndexing(attributes) && !config->cluster_enabled) {
-      attributes->ForEachKeyRange(
-          [&, this](const std::vector<std::string> &args, const CommandKeyRange &key_range) {
-            key_range.ForEachKey(
-                [&, this](const std::string &key) {
-                  auto res = srv_->indexer.Record(no_txn_ctx, key, ns_);
-                  if (res.IsOK()) {
-                    index_records.push_back(*res);
-                  } else if (!res.Is<Status::NoPrefixMatched>() && !res.Is<Status::TypeMismatched>()) {
-                    LOG(WARNING) << "index recording failed for key: " << key;
-                  }
-                },
-                args);
-          },
-          cmd_tokens);
-    }
-
     SetLastCmd(cmd_name);
-    s = ExecuteCommand(cmd_name, cmd_tokens, current_cmd.get(), &reply);
+    {
+      engine::Context ctx(srv_->storage);
 
-    // TODO: transaction support for index updating
-    for (const auto &record : index_records) {
-      auto s = GlobalIndexer::Update(no_txn_ctx, record);
-      if (!s.IsOK() && !s.Is<Status::TypeMismatched>()) {
-        LOG(WARNING) << "index updating failed for key: " << record.key;
+      // TODO: transaction support for index recording
+      std::vector<GlobalIndexer::RecordResult> index_records;
+      if (!srv_->index_mgr.index_map.empty() && IsCmdForIndexing(cmd_flags, attributes->category) &&
+          !config->cluster_enabled) {
+        attributes->ForEachKeyRange(
+            [&, this](const std::vector<std::string> &args, const CommandKeyRange &key_range) {
+              key_range.ForEachKey(
+                  [&, this](const std::string &key) {
+                    auto res = srv_->indexer.Record(ctx, key, ns_);
+                    if (res.IsOK()) {
+                      index_records.push_back(*res);
+                    } else if (!res.Is<Status::NoPrefixMatched>() && !res.Is<Status::TypeMismatched>()) {
+                      LOG(WARNING) << "index recording failed for key: " << key;
+                    }
+                  },
+                  args);
+            },
+            cmd_tokens);
+      }
+
+      s = ExecuteCommand(ctx, cmd_name, cmd_tokens, current_cmd.get(), &reply);
+      // TODO: transaction support for index updating
+      for (const auto &record : index_records) {
+        auto s = GlobalIndexer::Update(ctx, record);
+        if (!s.IsOK() && !s.Is<Status::TypeMismatched>()) {
+          LOG(WARNING) << "index updating failed for key: " << record.key;
+        }
       }
     }
+
+    srv_->FeedMonitorConns(this, cmd_tokens);
 
     // Break the execution loop when occurring the blocking command like BLPOP or BRPOP,
     // it will suspend the connection and wait for the wakeup signal.

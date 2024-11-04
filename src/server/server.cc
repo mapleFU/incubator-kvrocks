@@ -38,7 +38,7 @@
 #include <utility>
 
 #include "commands/commander.h"
-#include "config.h"
+#include "common/string_util.h"
 #include "config/config.h"
 #include "fmt/format.h"
 #include "redis_connection.h"
@@ -46,7 +46,6 @@
 #include "storage/redis_db.h"
 #include "storage/scripting.h"
 #include "storage/storage.h"
-#include "string_util.h"
 #include "thread_util.h"
 #include "time_util.h"
 #include "version.h"
@@ -103,7 +102,7 @@ Server::Server(engine::Storage *storage, Config *config)
   AdjustOpenFilesLimit();
   slow_log_.SetMaxEntries(config->slowlog_max_len);
   perf_log_.SetMaxEntries(config->profiling_sample_record_max_len);
-  lua_ = lua::CreateState(this);
+  lua_ = lua::CreateState();
 }
 
 Server::~Server() {
@@ -158,9 +157,10 @@ Status Server::Start() {
   }
 
   if (!config_->cluster_enabled) {
-    GET_OR_RET(index_mgr.Load(kDefaultNamespace));
-    for (auto [_, ns] : namespace_.List()) {
-      GET_OR_RET(index_mgr.Load(ns));
+    engine::Context no_txn_ctx = engine::Context::NoTransactionContext(storage);
+    GET_OR_RET(index_mgr.Load(no_txn_ctx, kDefaultNamespace));
+    for (const auto &[_, ns] : namespace_.List()) {
+      GET_OR_RET(index_mgr.Load(no_txn_ctx, ns));
     }
   }
 
@@ -281,7 +281,7 @@ Status Server::AddMaster(const std::string &host, uint32_t port, bool force_reco
   if (GetConfig()->master_use_repl_port) master_listen_port += 1;
 
   replication_thread_ = std::make_unique<ReplicationThread>(host, master_listen_port, this);
-  auto s = replication_thread_->Start([this]() { PrepareRestoreDB(); },
+  auto s = replication_thread_->Start([this]() { return PrepareRestoreDB(); },
                                       [this]() {
                                         this->is_loading_ = false;
                                         if (auto s = task_runner_.Start(); !s) {
@@ -390,7 +390,7 @@ int Server::PublishMessage(const std::string &channel, const std::string &msg) {
   std::vector<std::string> patterns;
   std::vector<ConnContext> to_publish_patterns_conn_ctxs;
   for (const auto &iter : pubsub_patterns_) {
-    if (util::StringMatch(iter.first, channel, 0)) {
+    if (util::StringMatch(iter.first, channel, false)) {
       for (const auto &conn_ctx : iter.second) {
         to_publish_patterns_conn_ctxs.emplace_back(conn_ctx);
         patterns.emplace_back(iter.first);
@@ -462,7 +462,7 @@ void Server::GetChannelsByPattern(const std::string &pattern, std::vector<std::s
   std::lock_guard<std::mutex> guard(pubsub_channels_mu_);
 
   for (const auto &iter : pubsub_channels_) {
-    if (pattern.empty() || util::StringMatch(pattern, iter.first, 0)) {
+    if (pattern.empty() || util::StringMatch(pattern, iter.first, false)) {
       channels->emplace_back(iter.first);
     }
   }
@@ -548,7 +548,7 @@ void Server::GetSChannelsByPattern(const std::string &pattern, std::vector<std::
 
   for (const auto &shard_channels : pubsub_shard_channels_) {
     for (const auto &iter : shard_channels) {
-      if (pattern.empty() || util::StringMatch(pattern, iter.first, 0)) {
+      if (pattern.empty() || util::StringMatch(pattern, iter.first, false)) {
         channels->emplace_back(iter.first);
       }
     }
@@ -852,13 +852,10 @@ void Server::GetRocksDBInfo(std::string *info) {
   uint64_t num_immutable_tables = 0, memtable_flush_pending = 0, compaction_pending = 0;
   uint64_t num_running_compaction = 0, num_live_versions = 0, num_super_version = 0, num_background_errors = 0;
 
-  db->GetAggregatedIntProperty("rocksdb.num-snapshots", &num_snapshots);
   db->GetAggregatedIntProperty("rocksdb.size-all-mem-tables", &memtable_sizes);
   db->GetAggregatedIntProperty("rocksdb.cur-size-all-mem-tables", &cur_memtable_sizes);
-  db->GetAggregatedIntProperty("rocksdb.num-running-flushes", &num_running_flushes);
   db->GetAggregatedIntProperty("rocksdb.num-immutable-mem-table", &num_immutable_tables);
   db->GetAggregatedIntProperty("rocksdb.mem-table-flush-pending", &memtable_flush_pending);
-  db->GetAggregatedIntProperty("rocksdb.num-running-compactions", &num_running_compaction);
   db->GetAggregatedIntProperty("rocksdb.current-super-version-number", &num_super_version);
   db->GetAggregatedIntProperty("rocksdb.background-errors", &num_background_errors);
   db->GetAggregatedIntProperty("rocksdb.compaction-pending", &compaction_pending);
@@ -876,6 +873,11 @@ void Server::GetRocksDBInfo(std::string *info) {
     db->GetIntProperty(subkey_cf_handle, rocksdb::DB::Properties::kBlockCachePinnedUsage, &block_cache_pinned_usage);
     string_stream << "block_cache_pinned_usage[" << subkey_cf_handle->GetName() << "]:" << block_cache_pinned_usage
                   << "\r\n";
+
+    // All column faimilies share the same property of the DB, so it's good to count a single one.
+    db->GetIntProperty(subkey_cf_handle, rocksdb::DB::Properties::kNumSnapshots, &num_snapshots);
+    db->GetIntProperty(subkey_cf_handle, rocksdb::DB::Properties::kNumRunningFlushes, &num_running_flushes);
+    db->GetIntProperty(subkey_cf_handle, rocksdb::DB::Properties::kNumRunningCompactions, &num_running_compaction);
   }
 
   for (const auto &cf_handle : *storage->GetCFHandles()) {
@@ -1336,17 +1338,10 @@ std::string Server::GetRocksDBStatsJson() const {
 // This function is called by replication thread when finished fetching all files from its master.
 // Before restoring the db from backup or checkpoint, we should
 // guarantee other threads don't access DB and its column families, then close db.
-void Server::PrepareRestoreDB() {
+bool Server::PrepareRestoreDB() {
   // Stop feeding slaves thread
   LOG(INFO) << "[server] Disconnecting slaves...";
   DisconnectSlaves();
-
-  // Stop task runner
-  LOG(INFO) << "[server] Stopping the task runner and clear task queue...";
-  task_runner_.Cancel();
-  if (auto s = task_runner_.Join(); !s) {
-    LOG(WARNING) << "[server] " << s.Msg();
-  }
 
   // If the DB is restored, the object 'db_' will be destroyed, but
   // 'db_' will be accessed in data migration task. To avoid wrong
@@ -1362,12 +1357,27 @@ void Server::PrepareRestoreDB() {
   // ASAP to avoid user can't receive responses for long time, because the following
   // 'CloseDB' may cost much time to acquire DB mutex.
   LOG(INFO) << "[server] Waiting workers for finishing executing commands...";
-  { auto exclusivity = WorkExclusivityGuard(); }
+  while (!works_concurrency_rw_lock_.try_lock()) {
+    if (replication_thread_->IsStopped()) {
+      is_loading_ = false;
+      return false;
+    }
+    usleep(1000);
+  }
+  works_concurrency_rw_lock_.unlock();
+
+  // Stop task runner
+  LOG(INFO) << "[server] Stopping the task runner and clear task queue...";
+  task_runner_.Cancel();
+  if (auto s = task_runner_.Join(); !s) {
+    LOG(WARNING) << "[server] " << s.Msg();
+  }
 
   // Cron thread, compaction checker thread, full synchronization thread
   // may always run in the background, we need to close db, so they don't actually work.
   LOG(INFO) << "[server] Waiting for closing DB...";
   storage->CloseDB();
+  return true;
 }
 
 void Server::WaitNoMigrateProcessing() {
@@ -1754,7 +1764,7 @@ Status Server::FunctionSetLib(const std::string &func, const std::string &lib) c
 }
 
 void Server::ScriptReset() {
-  auto lua = lua_.exchange(lua::CreateState(this));
+  auto lua = lua_.exchange(lua::CreateState());
   lua::DestroyState(lua);
 }
 
@@ -1972,28 +1982,10 @@ void Server::updateAllWatchedKeys() {
 }
 
 void Server::UpdateWatchedKeysFromArgs(const std::vector<std::string> &args, const redis::CommandAttributes &attr) {
-  if ((attr.flags & redis::kCmdWrite) && watched_key_size_ > 0) {
-    if (attr.key_range.first_key > 0) {
-      updateWatchedKeysFromRange(args, attr.key_range);
-    } else if (attr.key_range.first_key == -1) {
-      redis::CommandKeyRange range = attr.key_range_gen(args);
-
-      if (range.first_key > 0) {
-        updateWatchedKeysFromRange(args, range);
-      }
-    } else if (attr.key_range.first_key == -2) {
-      std::vector<redis::CommandKeyRange> vec_range = attr.key_range_vec_gen(args);
-
-      for (const auto &range : vec_range) {
-        if (range.first_key > 0) {
-          updateWatchedKeysFromRange(args, range);
-        }
-      }
-
-    } else {
-      // support commands like flushdb (write flag && key range {0,0,0})
-      updateAllWatchedKeys();
-    }
+  if ((attr.GenerateFlags(args) & redis::kCmdWrite) && watched_key_size_ > 0) {
+    attr.ForEachKeyRange([this](const std::vector<std::string> &args,
+                                redis::CommandKeyRange range) { updateWatchedKeysFromRange(args, range); },
+                         args, [this](const std::vector<std::string> &) { updateAllWatchedKeys(); });
   }
 }
 

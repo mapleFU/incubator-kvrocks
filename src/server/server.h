@@ -245,7 +245,7 @@ class Server {
   std::string GetRocksDBStatsJson() const;
   ReplState GetReplicationState();
 
-  void PrepareRestoreDB();
+  bool PrepareRestoreDB();
   void WaitNoMigrateProcessing();
   Status AsyncCompactDB(const std::string &begin_key = "", const std::string &end_key = "");
   Status AsyncBgSaveDB();
@@ -284,9 +284,6 @@ class Server {
   Status Propagate(const std::string &channel, const std::vector<std::string> &tokens) const;
   Status ExecPropagatedCommand(const std::vector<std::string> &tokens);
   Status ExecPropagateScriptCommand(const std::vector<std::string> &tokens);
-
-  void SetCurrentConnection(redis::Connection *conn) { curr_connection_ = conn; }
-  redis::Connection *GetCurrentConnection() { return curr_connection_; }
 
   LogCollector<PerfEntry> *GetPerfLog() { return &perf_log_; }
   LogCollector<SlowEntry> *GetSlowLog() { return &slow_log_; }
@@ -342,8 +339,6 @@ class Server {
   std::mutex last_random_key_cursor_mu_;
 
   std::atomic<lua_State *> lua_;
-
-  redis::Connection *curr_connection_ = nullptr;
 
   // client counters
   std::atomic<uint64_t> client_id_{1};
