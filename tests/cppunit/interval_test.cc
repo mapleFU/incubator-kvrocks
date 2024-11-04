@@ -74,7 +74,7 @@ TEST(IntervalSet, Simple) {
   std::uniform_int_distribution<int> dist_int(0, 50);
   std::random_device rd{};
   // Using random seed 0
-  std::mt19937 rand_gen(rd());
+  std::mt19937 rand_gen(rd()); // NOSONAR
   for (auto i = 0; i < 2000; ++i) {
     // generate random double
     auto gen = [&dist, &rand_gen] { return dist(rand_gen); };
